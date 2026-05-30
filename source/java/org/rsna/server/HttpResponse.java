@@ -99,7 +99,9 @@ public class HttpResponse {
 	 * @param value the header text value, e.g., "application/zip".
 	 */
 	public void setHeader(String name, String value) {
-		headers.put(name,value);
+		String safeName = sanitizeHeaderName(name);
+		String safeValue = sanitizeHeaderValue(value);
+		if ((safeName != null) && (safeValue != null)) headers.put(safeName, safeValue);
 	}
 
 	/**
@@ -409,6 +411,22 @@ public class HttpResponse {
 		return sb.toString();
 	}
 
+	private String sanitizeHeaderName(String name) {
+		if (name == null) return null;
+		if (name.contains("\r") || name.contains("\n")) {
+			throw new IllegalArgumentException("Header name contains CR/LF");
+		}
+		return name.trim();
+	}
+
+	private String sanitizeHeaderValue(String value) {
+		if (value == null) return "";
+		if (value.contains("\r") || value.contains("\n")) {
+			throw new IllegalArgumentException("Header value contains CR/LF");
+		}
+		return value;
+	}
+
 	/**
 	 * List the headers for this HttpResponse
 	 * @param margin the indent string for readability
@@ -541,5 +559,4 @@ public class HttpResponse {
 		}
 	}
 }
-
 

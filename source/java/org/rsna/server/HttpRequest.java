@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.LinkedList;
 import java.util.Locale;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 import org.apache.log4j.Logger;
 import org.rsna.util.AttackLog;
 import org.rsna.util.FileUtil;
@@ -44,6 +45,7 @@ public class HttpRequest {
 
 	public final Socket socket;
 	public final HttpServer server;
+	public final boolean secureConnection;
 	public final InputStream inputStream;
 	public String protocolName = "";
 	public String protocolVersion = "";
@@ -60,6 +62,9 @@ public class HttpRequest {
 	public Hashtable<String,String> cookies = new Hashtable<String,String>();
 	public Hashtable<String,String> params = new Hashtable<String,String>();
 	public Hashtable<String,List<String>> paramLists = new Hashtable<String,List<String>>();
+	private static final int MAX_LOG_VALUE_LENGTH = 256;
+	private static final Pattern SENSITIVE_PARAM_PATTERN =
+		Pattern.compile(".*(password|passwd|pwd|token|session|secret|key).*", Pattern.CASE_INSENSITIVE);
 
 	/**
 	 * Construct an HttpRequest, connect it to an InputStream, and
@@ -68,7 +73,7 @@ public class HttpRequest {
 	 * @throws Exception if the request cannot be parsed for any reason
 	 */
 	public HttpRequest(Socket socket) throws Exception {
-		this(socket, null);
+		this(socket, null, false);
 	}
 
 	/**
@@ -79,9 +84,22 @@ public class HttpRequest {
 	 * @throws Exception if the request cannot be parsed for any reason
 	 */
 	public HttpRequest(Socket socket, HttpServer server) throws Exception {
+		this(socket, server, (server != null) && server.getSSL());
+	}
+
+	/**
+	 * Construct an HttpRequest, connect it to an InputStream, and
+	 * read the request from the stream.
+	 * @param socket the socket on which to construct the request.
+	 * @param server the HttpServer which received the request.
+	 * @param secureConnection true if this request arrived over TLS.
+	 * @throws Exception if the request cannot be parsed for any reason
+	 */
+	public HttpRequest(Socket socket, HttpServer server, boolean secureConnection) throws Exception {
 		this.socket = socket;
 		this.server = server;
-		if (server != null) ssl = server.getSSL() ? "s" : "";
+		this.secureConnection = secureConnection;
+		ssl = secureConnection ? "s" : "";
 		socket.setSoTimeout(soTimeout);
 		inputStream = new BufferedInputStream(socket.getInputStream());
 		parseRequestLine();
@@ -741,11 +759,23 @@ public class HttpRequest {
 	 */
 	public String toVerboseString() {
 		StringBuffer sb = new StringBuffer();
-		sb.append(toString() + "\n");
+		sb.append(toSafeString() + "\n");
 		sb.append("Headers:\n"+listHeaders("  "));
 		sb.append("Cookies:\n"+listCookies("  "));
 		sb.append("Parameters:\n"+listParameters("  "));
 		return sb.toString();
+	}
+
+	/**
+	 * Get a safe String representation of this HttpRequest.
+	 * @return the request line and redacted query/body content.
+	 */
+	public String toSafeString() {
+		String renderedQuery = redactQueryString(query);
+		String renderedContent = redactQueryString(content);
+		return getProtocol().toUpperCase() + " " + method + " " + path
+				+ (renderedQuery.equals("") ? "" : "?" + renderedQuery)
+				+ ( (method.equals("POST") && (renderedContent != null) && (renderedContent.length() > 0)) ? "\n" + renderedContent : "");
 	}
 
 	/**
@@ -766,7 +796,7 @@ public class HttpRequest {
 	public String listHeaders(String margin) {
 		StringBuffer sb = new StringBuffer();
 		for (String key : headers.keySet()) {
-			sb.append(margin + key + ": " + headers.get(key) + "\n");
+			sb.append(margin + key + ": " + redactHeaderValue(key, headers.get(key)) + "\n");
 		}
 		if (sb.length() == 0) sb.append(margin + "none\n");
 		return sb.toString();
@@ -780,7 +810,7 @@ public class HttpRequest {
 	public String listCookies(String margin) {
 		StringBuffer sb = new StringBuffer();
 		for (String key : cookies.keySet()) {
-			sb.append(margin + key + ": " + cookies.get(key) + "\n");
+			sb.append(margin + key + ": " + redactValue(cookies.get(key)) + "\n");
 		}
 		if (sb.length() == 0) sb.append(margin + "none\n");
 		return sb.toString();
@@ -796,10 +826,64 @@ public class HttpRequest {
 		String[] names = getParameterNames();
 		Arrays.sort(names);
 		for (String name : names) {
-			sb.append(margin + name + ": " + getParameter(name) + "\n");
+			sb.append(margin + name + ": " + redactParameterValue(name, getParameter(name)) + "\n");
+			List<String> values = getParameterValues(name);
+			if ((values != null) && (values.size() > 1)) {
+				StringBuffer valuesSb = new StringBuffer();
+				for (int i=0; i<values.size(); i++) {
+					if (i > 0) valuesSb.append(", ");
+					valuesSb.append(redactParameterValue(name, values.get(i)));
+				}
+				sb.append(margin + "  values: [" + valuesSb.toString() + "]\n");
+			}
 		}
 		if (sb.length() == 0) sb.append(margin + "none\n");
 		return sb.toString();
+	}
+
+	private String redactHeaderValue(String name, String value) {
+		if (name == null) return truncateForLog(value);
+		String n = name.toLowerCase();
+		if (n.equals("authorization") || n.equals("rsna") || n.equals("cookie") || n.equals("set-cookie")) {
+			return "[REDACTED]";
+		}
+		return truncateForLog(value);
+	}
+
+	private String redactParameterValue(String name, String value) {
+		if ((name != null) && SENSITIVE_PARAM_PATTERN.matcher(name).matches()) return "[REDACTED]";
+		return truncateForLog(value);
+	}
+
+	private String redactQueryString(String input) {
+		if ((input == null) || input.trim().equals("")) return "";
+		String[] paramStrings = input.split("&");
+		StringBuffer sb = new StringBuffer();
+		for (int i=0; i<paramStrings.length; i++) {
+			if (i > 0) sb.append("&");
+			String param = paramStrings[i];
+			int k = param.indexOf("=");
+			String name = (k >= 0) ? param.substring(0, k) : param;
+			String value = (k >= 0) ? param.substring(k + 1) : "";
+			try { name = URLDecoder.decode(name.trim(), "UTF-8"); }
+			catch (Exception ignore) { }
+			sb.append(name);
+			if (k >= 0) {
+				sb.append("=");
+				sb.append(redactParameterValue(name, value));
+			}
+		}
+		return sb.toString();
+	}
+
+	private String redactValue(String value) {
+		return "[REDACTED]";
+	}
+
+	private String truncateForLog(String value) {
+		if (value == null) return "null";
+		if (value.length() <= MAX_LOG_VALUE_LENGTH) return value;
+		return value.substring(0, MAX_LOG_VALUE_LENGTH) + "...[truncated]";
 	}
 
 }

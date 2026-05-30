@@ -83,15 +83,13 @@ public class HttpHandler extends Thread {
 		}
 		catch (Exception ex) {
 			if (req != null) {
-				logger.error("Internal server error ("+req.toString()+")",ex);
+				logger.error("Internal server error ("+req.toSafeString()+")",ex);
 				try {
-					StringWriter sw = new StringWriter();
-					ex.printStackTrace(new PrintWriter(sw));
 					res = new HttpResponse(socket);
-					res.setResponseCode(res.ok); //so the browser will display the page
+					res.setResponseCode(res.servererror);
 					res.write("<html>");
 					res.write("<head><title>ERROR</title></head>");
-					res.write("<body><h1>Internal Server Error (HTTP 500)</h1><pre>"+sw.toString()+"</pre></body>");
+					res.write("<body><h1>Internal Server Error (HTTP 500)</h1></body>");
 					res.write("</html>");
 					res.send();
 				}

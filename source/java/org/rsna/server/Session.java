@@ -7,13 +7,15 @@
 
 package org.rsna.server;
 
-import java.math.BigInteger;
-import java.security.*;
+import java.security.SecureRandom;
+import java.util.Base64;
 
 /**
  * Class to encapsulate a session.
  */
 public class Session implements Comparable<Session> {
+	private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+	private static final int SESSION_ID_BYTES = 24; //192 bits
 	public long lastAccess;
 	public final User user;
 	public final String ipAddress;
@@ -24,7 +26,7 @@ public class Session implements Comparable<Session> {
 		lastAccess = System.currentTimeMillis();
 		this.user = user;
 		this.ipAddress = ipAddress;
-		id = getSessionID(user.getUsername(), ipAddress);
+		id = getSessionID();
 	}
 	
 	public User getUser() {
@@ -54,12 +56,10 @@ public class Session implements Comparable<Session> {
 		return (dif>0) ? 1 : ((dif==0) ? 0 : -1);
 	}
 
-	//Make a session ID by hashing the username, the IP address and the current time.
-	private String getSessionID(String username, String ipAddress) throws Exception {
-		String string = username + ":" + ipAddress + ":" + System.currentTimeMillis();
-		MessageDigest messageDigest = MessageDigest.getInstance("MD5");
-		byte[] hashed = messageDigest.digest(string.getBytes("UTF-8"));
-		BigInteger bi = new BigInteger(1, hashed);
-		return bi.toString();
+	//Make a session ID using cryptographically strong random bytes.
+	private String getSessionID() {
+		byte[] bytes = new byte[SESSION_ID_BYTES];
+		SECURE_RANDOM.nextBytes(bytes);
+		return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
 	}
 }

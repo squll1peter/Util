@@ -90,7 +90,7 @@ public class HttpService extends Thread {
 			HttpRequest req = null;
 			try {
 				res = new HttpResponse(socket);
-				req = new HttpRequest(socket);
+				req = new HttpRequest(socket, null, ssl);
 				service.process(req, res);
 			}
 			catch (Exception ex) {
@@ -116,4 +116,3 @@ public class HttpService extends Thread {
 		}
 	}
 }
-

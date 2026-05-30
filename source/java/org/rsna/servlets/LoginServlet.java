@@ -77,7 +77,13 @@ public class LoginServlet extends Servlet {
 		else if (req.getPath().endsWith("/ajax")) {
 			//It's an ajax call.
 			if (logout == null) {
-				res.setResponseCode( login(req, res, username, password) ? 200 : 403 );
+				if ((username != null) || (password != null)) {
+					logger.warn("Rejected GET credential login request from "+req.getRemoteAddress());
+					res.setResponseCode(403);
+				}
+				else {
+					res.setResponseCode(403);
+				}
 				res.send();
 			}
 			else {
@@ -91,7 +97,8 @@ public class LoginServlet extends Servlet {
 
 				//See if it's a direct login
 				if ((username != null) && (password != null)) {
-					login(req, res, username, password);
+					logger.warn("Rejected GET credential login request from "+req.getRemoteAddress());
+					Authenticator.getInstance().closeSession(req, res);
 					redirect(req, res);
 					return;
 				}
@@ -148,8 +155,6 @@ public class LoginServlet extends Servlet {
 						HttpRequest req, HttpResponse res,
 						String username, String password) {
 
-		logger.debug("username = "+username);
-		logger.debug("password = "+password);
 		boolean passed = false;
 		Authenticator authenticator = Authenticator.getInstance();
 		if ((username != null) && (password != null)) {
@@ -160,7 +165,7 @@ public class LoginServlet extends Servlet {
 			}
 		}
 		if (!passed) authenticator.closeSession(req, res);
-		logger.debug("passed = "+passed);
+		logger.debug("login passed = "+passed);
 		return passed;
 	}
 

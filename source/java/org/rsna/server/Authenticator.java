@@ -26,6 +26,8 @@ public class Authenticator {
 	protected Hashtable<String,Session> sessions = null;
 	long timeout = 1 * 60 * 60 * 1000; //default session timeout in ms = 1 hour
 	String sessionCookieName = "RSNASESSION";
+	private static final boolean RSNA_HEADER_ENABLED =
+		Boolean.parseBoolean(System.getProperty("org.rsna.auth.rsnaHeader.enabled", "false"));
 
 	/**
 	 * The protected constructor to prevent instantiation of
@@ -130,7 +132,7 @@ public class Authenticator {
 		//No session cookie, or cookie is not valid; check the headers.
 		//First try the Authorization header.
 		String credentials = req.getHeader("Authorization");
-		if (credentials != null) {
+		if ((credentials != null) && isSecure(req)) {
 			String type = "basic";
 			credentials = credentials.trim();
 			if (credentials.toLowerCase().startsWith(type)) {
@@ -143,12 +145,17 @@ public class Authenticator {
 				catch (Exception ex) { }
 			}
 		}
+		else if (credentials != null) {
+			logger.debug("Rejected Basic auth over non-HTTPS request from "+req.getRemoteAddress());
+		}
 
 		//Next try the RSNA header. This header is not encoded.
-		credentials = req.getHeader("RSNA");
-		if (credentials != null) {
-			User user = getUserFromCredentials(credentials);
-			if (user != null) return user;
+		if (RSNA_HEADER_ENABLED) {
+			credentials = req.getHeader("RSNA");
+			if (credentials != null) {
+				User user = getUserFromCredentials(credentials);
+				if (user != null) return user;
+			}
 		}
 
 		//The user cannot be authenticated.
@@ -196,7 +203,7 @@ public class Authenticator {
 			Session session = new Session(user, req.getRemoteAddress());
 			sessions.put(session.id, session);
 			if (!Users.getInstance().supportsSSO()) {
-				res.setHeader("Set-Cookie", sessionCookieName+"="+session.id + "; path=/");
+				res.setHeader("Set-Cookie", getSessionCookieValue(req, session.id, false));
 				res.setHeader("Cache-Control", "no-cache=\"set-cookie\"");
 			}
 			return true;
@@ -229,10 +236,26 @@ public class Authenticator {
 			sessions.remove(id);
 			if (!users.supportsSSO()) {
 				//Set a dummy session cookie that expires immediately.
-				res.setHeader("Set-Cookie", sessionCookieName+"=NONE; Max-Age=0");
+				res.setHeader("Set-Cookie", getSessionCookieValue(req, "NONE", true));
 				res.setHeader("Cache-Control", "no-cache=\"set-cookie\"");
 			}
 		}
+	}
+
+	private boolean isSecure(HttpRequest req) {
+		String protocol = req.getProtocol();
+		return (protocol != null) && protocol.equalsIgnoreCase("https");
+	}
+
+	private String getSessionCookieValue(HttpRequest req, String sessionValue, boolean expireNow) {
+		StringBuffer sb = new StringBuffer();
+		sb.append(sessionCookieName).append("=").append(sessionValue);
+		sb.append("; Path=/");
+		sb.append("; HttpOnly");
+		sb.append("; SameSite=Lax");
+		if (isSecure(req)) sb.append("; Secure");
+		if (expireNow) sb.append("; Max-Age=0");
+		return sb.toString();
 	}
 	
 	/**
