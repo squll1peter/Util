@@ -9,12 +9,14 @@ package org.rsna.servlets;
 
 import java.io.File;
 import java.io.InputStream;
+import java.util.Hashtable;
 import org.rsna.server.HttpRequest;
 import org.rsna.server.HttpResponse;
 
 import org.apache.log4j.Logger;
 import org.rsna.util.Attack;
 import org.rsna.util.AttackLog;
+import org.rsna.util.AttackLog.SecurityEvent;
 import org.rsna.util.FileUtil;
 import org.rsna.util.StringUtil;
 import org.rsna.util.XmlUtil;
@@ -80,6 +82,33 @@ public class AttackLogServlet extends Servlet {
 			e.setAttribute("count", Integer.toString(count));
 			e.setAttribute("last", last);
 			root.appendChild(e);
+		}
+
+		//Add aggregate category counts
+		Element categories = xml.createElement("Categories");
+		root.appendChild(categories);
+		Hashtable<String,Integer> categoryCounts = AttackLog.getInstance().getCategoryCounts();
+		for (String category : categoryCounts.keySet()) {
+			Element e = xml.createElement("Category");
+			e.setAttribute("name", category);
+			e.setAttribute("count", Integer.toString(categoryCounts.get(category)));
+			categories.appendChild(e);
+		}
+
+		//Add recent events
+		Element events = xml.createElement("RecentEvents");
+		root.appendChild(events);
+		for (SecurityEvent event : AttackLog.getInstance().getRecentEvents()) {
+			Element e = xml.createElement("Event");
+			e.setAttribute("timestamp", StringUtil.getDateTime(event.timestamp, " "));
+			e.setAttribute("ip", event.remoteIP);
+			e.setAttribute("method", event.method);
+			e.setAttribute("path", event.path);
+			e.setAttribute("host", event.host);
+			e.setAttribute("category", event.category);
+			e.setAttribute("severity", event.severity);
+			e.setAttribute("detail", event.detail);
+			events.appendChild(e);
 		}
 
 		Document xsl = XmlUtil.getDocument(FileUtil.getStream("/AttackLogServlet.xsl"));

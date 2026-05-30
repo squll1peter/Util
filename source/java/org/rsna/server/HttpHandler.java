@@ -12,7 +12,9 @@ import java.awt.event.ActionListener;
 import java.io.*;
 import java.net.Socket;
 import org.apache.log4j.Logger;
+import org.rsna.servlets.LoginServlet;
 import org.rsna.servlets.Servlet;
+import org.rsna.util.AttackLog;
 
 /**
  * The thread that handles an individual HTTP connection.
@@ -53,8 +55,8 @@ public class HttpHandler extends Thread {
 			//Get the request
 			req = new HttpRequest(socket, server);
 			
-			//Get the Servlet
-			Servlet servlet = selector.getServlet(req);
+			//Get the Servlet, applying the global auth gate before dispatch.
+			Servlet servlet = selectServlet(req);
 
 			//Call the appropriate method
 			if (req.method.equals("GET")) {
@@ -78,12 +80,36 @@ public class HttpHandler extends Thread {
 			else {
 				res.setResponseCode(res.notallowed);
 				res.send();
+				recordSecurityEvent(req, "unsupported method", "warn", "unsupported HTTP method");
 				logger.debug("Unallowed method in request ("+req.method+") received from "+req.getRemoteAddress());
 			}
+		}
+		catch (HttpParseException hpe) {
+			try {
+				res = new HttpResponse(socket);
+				res.setResponseCode(hpe.getStatusCode());
+				res.send();
+			}
+			catch (Exception ignore) { }
+			String remoteIP = "unknown";
+			try { remoteIP = req.getRemoteAddress(); } catch (Exception ignore) { }
+			AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+				System.currentTimeMillis(),
+				remoteIP,
+				(req != null) ? req.getMethod() : "",
+				(req != null) ? req.getPath() : "",
+				(req != null) ? req.getHost() : "",
+				hpe.getCategory(),
+				"warn",
+				hpe.getMessage(),
+				"",
+				(req != null) ? req.getHeader("User-Agent", "") : ""));
+			logger.warn("HTTP parse failure ("+hpe.getCategory()+") from " + socket.getRemoteSocketAddress() + ": " + hpe.getMessage());
 		}
 		catch (Exception ex) {
 			if (req != null) {
 				logger.error("Internal server error ("+req.toSafeString()+")",ex);
+				recordSecurityEvent(req, "internal error", "error", "servlet processing failed");
 				try {
 					res = new HttpResponse(socket);
 					res.setResponseCode(res.servererror);
@@ -102,5 +128,44 @@ public class HttpHandler extends Thread {
 		if (res != null) res.close();
 		try { socket.close(); }
 		catch (Exception ex) { logger.info("Unable to close the socket."); }
+	}
+
+	private Servlet selectServlet(HttpRequest req) {
+		Path path = req.getParsedPath();
+		String pathElement = path.element(0);
+		if (selector.getRequireAuthentication() && (req.getUser() == null)
+				&& !isPublicPath(pathElement)
+				&& !isLocalShutdownRequest(req, path, pathElement)) {
+			return new LoginServlet(selector.getRoot(), "");
+		}
+		return selector.getServlet(req);
+	}
+
+	private boolean isPublicPath(String pathElement) {
+		return pathElement.equals("login")
+				|| pathElement.equals("login.html")
+				|| pathElement.equals("BaseStyles.css")
+				|| pathElement.equals("ping");
+	}
+
+	private boolean isLocalShutdownRequest(HttpRequest req, Path path, String pathElement) {
+		return (req.getHeader("servicemanager") != null)
+				&& (path.length() == 1)
+				&& pathElement.equals("shutdown")
+				&& req.isFromLocalHost();
+	}
+
+	private void recordSecurityEvent(HttpRequest req, String category, String severity, String detail) {
+		AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+			System.currentTimeMillis(),
+			req.getRemoteAddress(),
+			req.getMethod(),
+			req.getPath(),
+			req.getHost(),
+			category,
+			severity,
+			detail,
+			"",
+			req.getHeader("User-Agent", "")));
 	}
 }

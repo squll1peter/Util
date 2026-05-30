@@ -11,7 +11,6 @@ import java.io.File;
 import java.lang.reflect.Constructor;
 import java.util.Hashtable;
 import org.apache.log4j.Logger;
-import org.rsna.servlets.LoginServlet;
 import org.rsna.servlets.Servlet;
 
 /**
@@ -78,16 +77,6 @@ public class ServletSelector {
 		//Get the path element on which to search.
 		Path path = req.getParsedPath();
 		String pathElement = path.element(0);
-
-		//Make sure the user is authenticated if necessary.
-		if (requireAuthentication && (req.getUser() == null)) {
-			if ((req.getHeader("servicemanager") == null)
-				|| (path.length() != 1)
-					|| !pathElement.equals("shutdown")
-						|| !req.isFromLocalHost()) {
-				return new LoginServlet(root, "");
-			}
-		}
 
 
 		//Okay, it is permissable to serve this request.

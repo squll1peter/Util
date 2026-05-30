@@ -10,13 +10,16 @@ package org.rsna.service;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import javax.net.ServerSocketFactory;
 import javax.net.ssl.SSLServerSocketFactory;
 import org.apache.log4j.Logger;
+import org.rsna.server.HttpParseException;
 import org.rsna.server.HttpRequest;
 import org.rsna.server.HttpResponse;
+import org.rsna.util.AttackLog;
 
 /**
  * A Thread that implements a single HTTP Service.
@@ -28,6 +31,7 @@ public class HttpService extends Thread {
 	final int maxThreads = 4; //max concurrent threads
 	final ThreadPoolExecutor execSvc;
 	final LinkedBlockingQueue<Runnable> queue;
+	final int queueCapacity;
 	final ServerSocket serverSocket;
 	final boolean ssl;
 	final int port;
@@ -45,11 +49,29 @@ public class HttpService extends Thread {
 		this.service = service;
 		this.name = name;
 		
-		queue = new LinkedBlockingQueue<Runnable>();
+		queueCapacity = Math.max(100, maxThreads * 50);
+		queue = new LinkedBlockingQueue<Runnable>(queueCapacity);
 		ServerSocketFactory serverSocketFactory =
 			ssl ? SSLServerSocketFactory.getDefault() : ServerSocketFactory.getDefault();
 		serverSocket = serverSocketFactory.createServerSocket(port); //use the default backlog of 50
-		execSvc = new ThreadPoolExecutor( maxThreads, maxThreads, 0L, TimeUnit.MILLISECONDS, queue );
+		RejectedExecutionHandler rejectionHandler = new RejectedExecutionHandler() {
+			public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+				if (r instanceof Handler) {
+					Handler handler = (Handler)r;
+					try {
+						HttpResponse res = new HttpResponse(handler.socket);
+						res.setResponseCode(503);
+						res.write("Service Unavailable");
+						res.send();
+						res.close();
+					}
+					catch (Exception ignore) { }
+					try { handler.socket.close(); } catch (Exception ignore) { }
+				}
+				logger.warn("HttpService queue full; request rejected with 503");
+			}
+		};
+		execSvc = new ThreadPoolExecutor( maxThreads, maxThreads, 0L, TimeUnit.MILLISECONDS, queue, rejectionHandler );
 	}
 
 	// Start the HttpService and accept connections.
@@ -92,6 +114,26 @@ public class HttpService extends Thread {
 				res = new HttpResponse(socket);
 				req = new HttpRequest(socket, null, ssl);
 				service.process(req, res);
+			}
+			catch (HttpParseException hpe) {
+				try {
+					res = new HttpResponse(socket);
+					res.setResponseCode(hpe.getStatusCode());
+					res.send();
+				}
+				catch (Exception ignore) { }
+				AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+					System.currentTimeMillis(),
+					(req != null) ? req.getRemoteAddress() : "unknown",
+					(req != null) ? req.getMethod() : "",
+					(req != null) ? req.getPath() : "",
+					(req != null) ? req.getHost() : "",
+					hpe.getCategory(),
+					"warn",
+					hpe.getMessage(),
+					"",
+					(req != null) ? req.getHeader("User-Agent", "") : ""));
+				logger.warn("HTTP parse failure ("+hpe.getCategory()+"): "+hpe.getMessage());
 			}
 			catch (Exception ex) {
 				if (ex instanceof javax.net.ssl.SSLException) {

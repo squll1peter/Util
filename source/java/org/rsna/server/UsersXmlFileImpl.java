@@ -8,11 +8,16 @@
 package org.rsna.server;
 
 import java.io.File;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.Iterator;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
 import org.apache.log4j.Logger;
 import org.rsna.util.DigestUtil;
 import org.rsna.util.FileUtil;
@@ -33,9 +38,15 @@ public class UsersXmlFileImpl extends Users {
 	static final Logger logger = Logger.getLogger(UsersXmlFileImpl.class);
 
 	static String usersFileName = "users.xml";
+	static final String PBKDF2_PREFIX = "pbkdf2$";
+	static final int PBKDF2_ITERATIONS = 100000;
+	static final int PBKDF2_SALT_BYTES = 16;
+	static final int PBKDF2_KEY_BITS = 256;
 	File usersFile = null;
 	Hashtable<String,User> users = null;
 	HashSet<String> roles = null;
+	boolean bootstrapLocalOnly = false;
+	final SecureRandom secureRandom = new SecureRandom();
 
 	/**
 	 * Constructor.
@@ -48,7 +59,10 @@ public class UsersXmlFileImpl extends Users {
 		//Load the users table from the XML file, creating
 		//an empty XML file if it does not exist.
 		usersFile = new File(usersFileName);
-		if (!usersFile.exists()) FileUtil.setText(usersFile, getEmptyUsersText());
+		if (!usersFile.exists()) {
+			bootstrapLocalOnly = true;
+			FileUtil.setText(usersFile, getEmptyUsersText());
+		}
 		users = getUsers();
 	}
 
@@ -65,6 +79,7 @@ public class UsersXmlFileImpl extends Users {
 		}
 
 		Element root = usersXML.getDocumentElement();
+		bootstrapLocalOnly = root.getAttribute("bootstrapLocalOnly").equals("true");
 		boolean isHashed = root.getAttribute("mode").equals("digest");
 		Node userChild = root.getFirstChild();
 		while (userChild != null) {
@@ -115,7 +130,7 @@ public class UsersXmlFileImpl extends Users {
 	 * @return the converted password.
 	 */
 	public String convertPassword(String password) {
-		return DigestUtil.hash(password);
+		return createPBKDF2Hash(password);
 	}
 
 	/**
@@ -198,10 +213,25 @@ public class UsersXmlFileImpl extends Users {
 	 * @return true if the credentials match a user; false otherwise.
 	 */
 	public User authenticate(String username, String password) {
+		return authenticate(username, password, null);
+	}
+
+	public User authenticate(String username, String password, HttpRequest req) {
+		if (bootstrapLocalOnly && ((req == null) || !req.isFromLocalHost())) return null;
 		User user = getUser(username);
 		if (user != null) {
-			String pw = convertPassword(password);
-			if (user.getPassword().equals(pw)) return user;
+			String stored = user.getPassword();
+			if (isPBKDF2(stored)) {
+				if (verifyPBKDF2(password, stored)) return user;
+			}
+			else {
+				String pw = DigestUtil.hash(password);
+				if (constantTimeEquals(stored, pw)) {
+					user.setPassword(createPBKDF2Hash(password));
+					addUser(user); //migrate legacy MD5 to PBKDF2
+					return user;
+				}
+			}
 		}
 		return null;
 	}
@@ -213,6 +243,8 @@ public class UsersXmlFileImpl extends Users {
 	 */
 	public synchronized void addUser(User user) {
 		if ((user != null) && (users != null)) {
+			if (!isPBKDF2(user.getPassword())) user.setPassword(createPBKDF2Hash(user.getPassword()));
+			bootstrapLocalOnly = false;
 			users.put(user.getUsername(), user);
 			FileUtil.setText(usersFile, getUsersText());
 		}
@@ -239,6 +271,7 @@ public class UsersXmlFileImpl extends Users {
 			Document doc = XmlUtil.getDocument();
 			Element root = doc.createElement("users");
 			root.setAttribute("mode", "digest");
+			root.setAttribute("bootstrapLocalOnly", Boolean.toString(bootstrapLocalOnly));
 			doc.appendChild(root);
 			String[] names = getUsernames();
 			for (String name : names) {
@@ -265,7 +298,7 @@ public class UsersXmlFileImpl extends Users {
 	private String getEmptyUsersText() {
 		return
 			"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-			"<users>" +
+			"<users bootstrapLocalOnly=\"true\">" +
 				"<user username=\"king\" password=\"password\">" +
 					"<role>admin</role>" +
 					getUserRoles() +
@@ -276,6 +309,50 @@ public class UsersXmlFileImpl extends Users {
 					getUserRoles() +
 				"</user>" +
 			"</users>";
+	}
+
+	private boolean isPBKDF2(String value) {
+		return (value != null) && value.startsWith(PBKDF2_PREFIX);
+	}
+
+	private String createPBKDF2Hash(String password) {
+		try {
+			if (password == null) password = "";
+			byte[] salt = new byte[PBKDF2_SALT_BYTES];
+			secureRandom.nextBytes(salt);
+			byte[] hash = derivePBKDF2(password.toCharArray(), salt, PBKDF2_ITERATIONS, PBKDF2_KEY_BITS);
+			return PBKDF2_PREFIX
+				+ PBKDF2_ITERATIONS + "$"
+				+ Base64.getEncoder().encodeToString(salt) + "$"
+				+ Base64.getEncoder().encodeToString(hash);
+			}
+			catch (Exception ex) {
+				throw new IllegalStateException("Unable to create PBKDF2 password hash", ex);
+			}
+	}
+
+	private boolean verifyPBKDF2(String password, String stored) {
+		try {
+			String[] parts = stored.split("\\$");
+			if (parts.length != 4) return false;
+			int iterations = Integer.parseInt(parts[1]);
+			byte[] salt = Base64.getDecoder().decode(parts[2]);
+			byte[] expected = Base64.getDecoder().decode(parts[3]);
+			byte[] actual = derivePBKDF2(password.toCharArray(), salt, iterations, expected.length * 8);
+			return MessageDigest.isEqual(expected, actual);
+		}
+		catch (Exception ex) { return false; }
+	}
+
+	private byte[] derivePBKDF2(char[] password, byte[] salt, int iterations, int keyBits) throws Exception {
+		PBEKeySpec spec = new PBEKeySpec(password, salt, iterations, keyBits);
+		SecretKeyFactory skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+		return skf.generateSecret(spec).getEncoded();
+	}
+
+	private boolean constantTimeEquals(String a, String b) {
+		if ((a == null) || (b == null)) return false;
+		return MessageDigest.isEqual(a.getBytes(), b.getBytes());
 	}
 
 	//Get the non-administrative roles

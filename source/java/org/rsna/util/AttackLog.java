@@ -8,8 +8,12 @@
 package org.rsna.util;
 
 import java.net.HttpURLConnection;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Hashtable;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.log4j.Logger;
@@ -24,7 +28,10 @@ public class AttackLog {
 
 	static final Logger logger = Logger.getLogger(AttackLog.class);
 	static AttackLog attackLog = null;
+	private static final int MAX_RECENT_EVENTS = 1000;
 	private Hashtable<String,Attack> attackTable;
+	private LinkedList<SecurityEvent> recentEvents;
+	private Hashtable<String,Integer> categoryCounts;
 	final int readTimeout = 60000;
 
 	/**
@@ -33,6 +40,8 @@ public class AttackLog {
 	 */
 	protected AttackLog() {
 		this.attackTable = new Hashtable<String,Attack>();
+		this.recentEvents = new LinkedList<SecurityEvent>();
+		this.categoryCounts = new Hashtable<String,Integer>();
 	}
 
 	/**
@@ -49,13 +58,39 @@ public class AttackLog {
 	 * @param ip the IP address of the attacker.
 	 */
     public synchronized void addAttack(String ip) {
+		recordEvent(new SecurityEvent(
+			System.currentTimeMillis(),
+			ip,
+			"",
+			"",
+			"",
+			"malformed request",
+			"warn",
+			"request parse failure",
+			"",
+			""));
+	}
+
+	/**
+	 * Record a structured security event.
+	 * @param event the event to add.
+	 */
+	public synchronized void recordEvent(SecurityEvent event) {
+		if (event == null) return;
+		String ip = sanitize(event.remoteIP);
 		Attack attack = attackTable.get(ip);
 		if (attack == null) attack = new Attack(ip);
 		attack.increment();
-		attack.setLast(System.currentTimeMillis());
-		getInfo(attack);
+		attack.setLast(event.timestamp);
 		attackTable.put(ip, attack);
-		logger.info("Attack logged:\n" + attack.toString());		
+
+		String category = sanitize(event.category);
+		Integer count = categoryCounts.get(category);
+		categoryCounts.put(category, (count == null) ? 1 : count + 1);
+
+		recentEvents.add(new SecurityEvent(event));
+		while (recentEvents.size() > MAX_RECENT_EVENTS) recentEvents.removeFirst();
+		logger.info("Security event logged ["+category+"] from "+ip);
 	}
 
 	/**
@@ -72,6 +107,33 @@ public class AttackLog {
 		}
 		Arrays.sort(atks);
 		return atks;
+	}
+
+	/**
+	 * Get a defensive snapshot of recent events, newest-first.
+	 * @return list of security events.
+	 */
+	public synchronized List<SecurityEvent> getRecentEvents() {
+		ArrayList<SecurityEvent> events = new ArrayList<SecurityEvent>();
+		for (SecurityEvent e : recentEvents) events.add(new SecurityEvent(e));
+		Collections.reverse(events);
+		return events;
+	}
+
+	/**
+	 * Get aggregate event counts by category.
+	 * @return snapshot map of counts.
+	 */
+	public synchronized Hashtable<String,Integer> getCategoryCounts() {
+		Hashtable<String,Integer> copy = new Hashtable<String,Integer>();
+		for (String key : categoryCounts.keySet()) {
+			copy.put(key, categoryCounts.get(key));
+		}
+		return copy;
+	}
+
+	private String sanitize(String s) {
+		return (s == null) ? "" : s;
 	}
 
 	private void getInfo(Attack attack) {
@@ -116,6 +178,58 @@ public class AttackLog {
 				String value = matcher.group(2);
 				put(key, value);
 			}
+		}
+	}
+
+	/**
+	 * Structured security-event record for in-memory attack telemetry.
+	 */
+	public static class SecurityEvent {
+		public final long timestamp;
+		public final String remoteIP;
+		public final String method;
+		public final String path;
+		public final String host;
+		public final String category;
+		public final String severity;
+		public final String detail;
+		public final String username;
+		public final String userAgent;
+
+		public SecurityEvent(
+				long timestamp,
+				String remoteIP,
+				String method,
+				String path,
+				String host,
+				String category,
+				String severity,
+				String detail,
+				String username,
+				String userAgent) {
+			this.timestamp = timestamp;
+			this.remoteIP = remoteIP;
+			this.method = method;
+			this.path = path;
+			this.host = host;
+			this.category = category;
+			this.severity = severity;
+			this.detail = detail;
+			this.username = username;
+			this.userAgent = userAgent;
+		}
+
+		public SecurityEvent(SecurityEvent event) {
+			this.timestamp = event.timestamp;
+			this.remoteIP = event.remoteIP;
+			this.method = event.method;
+			this.path = event.path;
+			this.host = event.host;
+			this.category = event.category;
+			this.severity = event.severity;
+			this.detail = event.detail;
+			this.username = event.username;
+			this.userAgent = event.userAgent;
 		}
 	}
 }

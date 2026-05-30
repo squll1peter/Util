@@ -10,6 +10,7 @@ package org.rsna.server;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.Hashtable;
+import java.security.SecureRandom;
 import org.apache.log4j.Logger;
 import org.rsna.util.Base64;
 import org.rsna.util.FileUtil;
@@ -24,10 +25,12 @@ public class Authenticator {
 	static Authenticator authenticator = null;
 
 	protected Hashtable<String,Session> sessions = null;
+	protected Hashtable<String,String> csrfTokens = null;
 	long timeout = 1 * 60 * 60 * 1000; //default session timeout in ms = 1 hour
 	String sessionCookieName = "RSNASESSION";
 	private static final boolean RSNA_HEADER_ENABLED =
 		Boolean.parseBoolean(System.getProperty("org.rsna.auth.rsnaHeader.enabled", "false"));
+	private static final SecureRandom CSRF_RANDOM = new SecureRandom();
 
 	/**
 	 * The protected constructor to prevent instantiation of
@@ -35,6 +38,7 @@ public class Authenticator {
 	 */
 	protected Authenticator() {
 		sessions = new Hashtable<String,Session>();
+		csrfTokens = new Hashtable<String,String>();
 	}
 
 	/**
@@ -139,7 +143,7 @@ public class Authenticator {
 				credentials = credentials.substring(type.length()).trim();
 				try {
 					credentials = new String(Base64.decode(credentials), "UTF-8");
-					User user = getUserFromCredentials(credentials);
+					User user = getUserFromCredentials(credentials, req);
 					if (user != null) return user;
 				}
 				catch (Exception ex) { }
@@ -153,7 +157,7 @@ public class Authenticator {
 		if (RSNA_HEADER_ENABLED) {
 			credentials = req.getHeader("RSNA");
 			if (credentials != null) {
-				User user = getUserFromCredentials(credentials);
+				User user = getUserFromCredentials(credentials, req);
 				if (user != null) return user;
 			}
 		}
@@ -162,15 +166,15 @@ public class Authenticator {
 		return null;
 	}
 
-	private User getUserFromCredentials(String credentials) {
+	private User getUserFromCredentials(String credentials, HttpRequest req) {
 		Users users = Users.getInstance();
 		String[] up = credentials.split(":");
 		User user = null;
 		if (up.length == 2) {
-			user = users.authenticate(up[0], up[1]);
+			user = users.authenticate(up[0], up[1], req);
 		}
 		else if (up.length == 1) {
-			user = users.authenticate(up[0], "");
+			user = users.authenticate(up[0], "", req);
 		}
 		return user;
 	}
@@ -202,6 +206,7 @@ public class Authenticator {
 		try {
 			Session session = new Session(user, req.getRemoteAddress());
 			sessions.put(session.id, session);
+			csrfTokens.put(session.id, createCsrfToken());
 			if (!Users.getInstance().supportsSSO()) {
 				res.setHeader("Set-Cookie", getSessionCookieValue(req, session.id, false));
 				res.setHeader("Cache-Control", "no-cache=\"set-cookie\"");
@@ -234,6 +239,7 @@ public class Authenticator {
 		if (id != null) {
 			//A session was specified. Remove it from the hashtable.
 			sessions.remove(id);
+			csrfTokens.remove(id);
 			if (!users.supportsSSO()) {
 				//Set a dummy session cookie that expires immediately.
 				res.setHeader("Set-Cookie", getSessionCookieValue(req, "NONE", true));
@@ -264,8 +270,50 @@ public class Authenticator {
 	public void removeInactiveSessions() {
 		for (String id : sessions.keySet().toArray(new String[sessions.size()])) {
 			Session session = sessions.get(id);
-			if (session.hasTimedOut()) sessions.remove(id);
+			if (session.hasTimedOut()) {
+				sessions.remove(id);
+				csrfTokens.remove(id);
+			}
 		}
+	}
+
+	public synchronized String getCsrfToken(HttpRequest req) {
+		if (req == null) return "";
+		String sessionId = req.getCookie(sessionCookieName);
+		if (sessionId == null) return "";
+		String token = csrfTokens.get(sessionId);
+		if (token == null) {
+			token = createCsrfToken();
+			csrfTokens.put(sessionId, token);
+		}
+		return token;
+	}
+
+	public synchronized boolean validateCsrfToken(HttpRequest req) {
+		if (req == null) return false;
+		String sessionId = req.getCookie(sessionCookieName);
+		if (sessionId == null) return false;
+		String expected = csrfTokens.get(sessionId);
+		if (expected == null) return false;
+		String provided = req.getParameter("csrfToken", "").trim();
+		if (provided.equals("")) provided = req.getHeader("X-CSRF-Token", "").trim();
+		return constantTimeEquals(expected, provided);
+	}
+
+	private String createCsrfToken() {
+		byte[] bytes = new byte[24];
+		CSRF_RANDOM.nextBytes(bytes);
+		return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+	}
+
+	private boolean constantTimeEquals(String a, String b) {
+		if ((a == null) || (b == null)) return false;
+		byte[] ab = a.getBytes();
+		byte[] bb = b.getBytes();
+		if (ab.length != bb.length) return false;
+		int result = 0;
+		for (int i=0; i<ab.length; i++) result |= (ab[i] ^ bb[i]);
+		return result == 0;
 	}
 	
 	/**

@@ -25,11 +25,13 @@ import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.TrustManager;
+import org.apache.log4j.Logger;
 
 /**
  * A class to encapsulate HTTP utilities.
  */
 public class HttpUtil {
+	static final Logger logger = Logger.getLogger(HttpUtil.class);
 
 	/**
 	 * Get an HttpURLConnection for a specified URL String. The
@@ -61,6 +63,32 @@ public class HttpUtil {
 	 * or if an error occurs in initializing the connection.
 	 */
 	public static HttpURLConnection getConnection(URL url) throws Exception {
+		return getConnection(url, false);
+	}
+
+	/**
+	 * Get an HttpURLConnection with insecure HTTPS trust settings.
+	 * This method is intended only for explicit legacy compatibility.
+	 * @param urlString the absolute URL, starting with protocol.
+	 * @return the HttpURLConnection.
+	 * @throws Exception on initialization errors.
+	 */
+	public static HttpURLConnection getInsecureConnection(String urlString) throws Exception {
+		return getInsecureConnection(new URI(urlString).toURL());
+	}
+
+	/**
+	 * Get an HttpURLConnection with insecure HTTPS trust settings.
+	 * This method is intended only for explicit legacy compatibility.
+	 * @param url the absolute URL, including protocol.
+	 * @return the HttpURLConnection.
+	 * @throws Exception on initialization errors.
+	 */
+	public static HttpURLConnection getInsecureConnection(URL url) throws Exception {
+		return getConnection(url, true);
+	}
+
+	private static HttpURLConnection getConnection(URL url, boolean insecureHttps) throws Exception {
 		HttpURLConnection conn;
 		Proxy proxy = null;
 
@@ -82,17 +110,19 @@ public class HttpUtil {
 		//Instantiate the connection.
 		if (protocol.equals("https")) {
 			HttpsURLConnection httpsConn = (HttpsURLConnection)url.openConnection(proxy);
-			
-			//Accept all hosts
-			httpsConn.setHostnameVerifier(new AcceptAllHostnameVerifier());
-			httpsConn.setUseCaches(false);
-			httpsConn.setDefaultUseCaches(false);
+			if (insecureHttps) {
+				logger.warn("Using insecure HTTPS compatibility path for URL: " + url);
+				//Accept all hosts
+				httpsConn.setHostnameVerifier(new AcceptAllHostnameVerifier());
+				httpsConn.setUseCaches(false);
+				httpsConn.setDefaultUseCaches(false);
 
-			//Accept all certs
-			TrustManager[] trustAllCerts = new TrustManager[] { new AcceptAllX509TrustManager() };
-			SSLContext sc = SSLContext.getInstance("SSL");
-			sc.init(null, trustAllCerts, new SecureRandom());
-			httpsConn.setSSLSocketFactory(sc.getSocketFactory());
+				//Accept all certs
+				TrustManager[] trustAllCerts = new TrustManager[] { new AcceptAllX509TrustManager() };
+				SSLContext sc = SSLContext.getInstance("SSL");
+				sc.init(null, trustAllCerts, new SecureRandom());
+				httpsConn.setSSLSocketFactory(sc.getSocketFactory());
+			}
 
 			conn = httpsConn;
 		}

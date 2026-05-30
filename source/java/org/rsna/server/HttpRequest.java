@@ -41,7 +41,13 @@ public class HttpRequest {
 
 	protected static SimpleDateFormat dateFormat = null;
 
-	final int soTimeout = 60000;
+	final int soTimeout = 15000;
+	private static final int MAX_REQUEST_LINE_LENGTH = 8 * 1024;
+	private static final int MAX_HEADER_LINE_LENGTH = 8 * 1024;
+	private static final int MAX_TOTAL_HEADERS_LENGTH = 64 * 1024;
+	private static final int MAX_HEADER_COUNT = 100;
+	private static final int MAX_QUERY_LENGTH = 8 * 1024;
+	private static final int MAX_FORM_CONTENT_LENGTH = 1024 * 1024;
 
 	public final Socket socket;
 	public final HttpServer server;
@@ -106,6 +112,13 @@ public class HttpRequest {
 		getHeaders();
 		if ( (method.equals("POST") || method.equals("PUT"))
 				&& getContentType().toLowerCase().contains("application/x-www-form-urlencoded") ) {
+			int contentLength = getContentLength();
+			if (contentLength < 0) {
+				throw new HttpParseException(HttpResponse.badrequest, "invalid content length", "Invalid form content length");
+			}
+			if (contentLength > MAX_FORM_CONTENT_LENGTH) {
+				throw new HttpParseException(413, "body too large", "Form body too large");
+			}
 			content = getContentText();
 			getQueryParameters(content);
 		}
@@ -585,28 +598,33 @@ public class HttpRequest {
 	}
 
 	//Get the method and path from the first line of the request.
-	private void parseRequestLine() {
+	private void parseRequestLine() throws HttpParseException {
 		query = "";
 		path = "";
 		method = "";
 		parsedPath = new Path("");
 
-		String line = getLine();
+		String line = getLine(MAX_REQUEST_LINE_LENGTH, false);
 		logger.debug(line);
+		if (line.equals("")) throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Missing request line");
+		ensureNoCtl(line, "request line");
 
 		//get the method
 		line = line.trim();
 		int methodEnd = line.indexOf(" ");
-		if (methodEnd < 0) return;
+		if (methodEnd < 0) throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Invalid request line");
 		method = line.substring(0, methodEnd).toUpperCase();
 
 		//get the path and the query string
 		int protocolStart = line.indexOf(" HTTP");
-		if (protocolStart < 0) return;
+		if (protocolStart < 0) throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Invalid protocol marker");
 		path = line.substring(methodEnd, protocolStart).trim();
 		int queryStringStart = path.indexOf("?");
 		if (queryStringStart >= 0) {
 			query = path.substring(queryStringStart + 1); //skip the '?'
+			if (query.length() > MAX_QUERY_LENGTH) {
+				throw new HttpParseException(HttpResponse.badrequest, "query too large", "Query string too long");
+			}
 			path = path.substring(0, queryStringStart).trim();
 		}
 		int protocolVersionStart = line.indexOf("/", protocolStart);
@@ -651,9 +669,20 @@ public class HttpRequest {
 
 	//Parse the headers, creating the headers and cookies Hashtables.
 	//positioning the stream to the beginning of the data.
-	private Hashtable<String,String> getHeaders() {
+	private Hashtable<String,String> getHeaders() throws HttpParseException {
+		int headerCount = 0;
+		int totalHeaderBytes = 0;
 		String line;
-		while (!((line=getLine()).equals(""))) {
+		while (!((line=getLine(MAX_HEADER_LINE_LENGTH, true)).equals(""))) {
+			headerCount++;
+			if (headerCount > MAX_HEADER_COUNT) {
+				throw new HttpParseException(431, "header too large", "Too many headers");
+			}
+			totalHeaderBytes += line.length();
+			if (totalHeaderBytes > MAX_TOTAL_HEADERS_LENGTH) {
+				throw new HttpParseException(431, "header too large", "Headers too large");
+			}
+			ensureNoCtl(line, "header");
 			int k = line.indexOf(":");
 			if (k != -1) {
 				String headerName = line.substring(0,k).trim().toLowerCase();
@@ -667,22 +696,32 @@ public class HttpRequest {
 
 	//Get one header line from the stream,
 	//using \r\n as the delimiter.
-	private String getLine() {
+	private String getLine(int maxLength, boolean headerLine) throws HttpParseException {
 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
 		int b = 'x';
 		try {
-			while ( (b != '\n') && ((b=inputStream.read()) != -1) ) baos.write(b);
+			while ( (b != '\n') && ((b=inputStream.read()) != -1) ) {
+				baos.write(b);
+				if (baos.size() > maxLength) {
+					throw new HttpParseException(headerLine ? 431 : HttpResponse.badrequest,
+						headerLine ? "header too large" : "malformed request",
+						"HTTP line exceeded limit");
+				}
+			}
 			byte[] bytes = baos.toByteArray();
 			try { return ( new String(bytes, "UTF-8") ).trim(); }
 			catch (Exception useDefault) { return ( new String(bytes) ).trim(); }
+		}
+		catch (HttpParseException hpe) {
+			throw hpe;
 		}
 		catch (Exception ex) {
 			String ip = getRemoteAddress();
 			AttackLog.getInstance().addAttack(ip);
 			logger.debug(ex.getClass().getName() + ": " + ip);
 			if (b != 'x') logger.debug("...Request:\n"+toString());
+			throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Unable to read request line");
 		}
-		return "";
 	}
 
 	//Add a set of cookies to a Hashtable<String,String>
@@ -708,13 +747,12 @@ public class HttpRequest {
 			if (query.trim().equals("")) return;
 			String[] paramStrings = query.split("&");
 			for (String param : paramStrings) {
-				String[] paramParts = param.split("=");
-				String name = URLDecoder.decode(paramParts[0].trim(),"UTF-8");
+				int eq = param.indexOf("=");
+				String rawName = (eq >= 0) ? param.substring(0, eq) : param;
+				String rawValue = (eq >= 0) ? param.substring(eq + 1) : "";
+				String name = URLDecoder.decode(rawName.trim(),"UTF-8");
 				if (name.startsWith("amp;")) name = name.substring(4);
-				String value = "";
-				if (paramParts.length == 2) {
-					value = URLDecoder.decode(paramParts[1].trim(),"UTF-8");
-				}
+				String value = URLDecoder.decode(rawValue.trim(),"UTF-8");
 				addParameter(name, value);
 			}
 		}
@@ -727,30 +765,47 @@ public class HttpRequest {
 	//This method should only be called if the content-type is
 	//application/x-www-form-urlencoded and the content is
 	//encoded as UTF-8.
-	private String getContentText() {
+	private String getContentText() throws HttpParseException {
 		try {
 			byte[] bytes = getContentBytes();
 			String content = new String(bytes,"UTF-8");
 			return content;
 		}
-		catch (Exception nothingThere) { return ""; }
+		catch (HttpParseException hpe) { throw hpe; }
+		catch (Exception nothingThere) {
+			throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Invalid form body encoding");
+		}
 	}
 
 	//Read the content after the headers.
-	private byte[] getContentBytes() {
+	private byte[] getContentBytes() throws HttpParseException {
 		byte[] bytes = new byte[0];
 		try {
 			int contentLength = getContentLength();
+			if (contentLength < 0) throw new HttpParseException(HttpResponse.badrequest, "invalid content length", "Negative content length");
 			bytes = new byte[contentLength];
 			int totalBytesRead = 0;
 			while (totalBytesRead < contentLength) {
-				totalBytesRead += inputStream.read(bytes, totalBytesRead, contentLength - totalBytesRead);
+				int bytesRead = inputStream.read(bytes, totalBytesRead, contentLength - totalBytesRead);
+				if (bytesRead < 0) throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Unexpected EOF in request body");
+				totalBytesRead += bytesRead;
 			}
 		}
+		catch (HttpParseException hpe) { throw hpe; }
 		catch (Exception done) {
 			logger.debug("Exception caught while getting the content.", done);
+			throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Unable to read request body");
 		}
 		return bytes;
+	}
+
+	private void ensureNoCtl(String s, String fieldName) throws HttpParseException {
+		for (int i=0; i<s.length(); i++) {
+			char c = s.charAt(i);
+			if ((c < 0x20) && (c != '\t')) {
+				throw new HttpParseException(HttpResponse.badrequest, "malformed request", "Control character in " + fieldName);
+			}
+		}
 	}
 
 	/**

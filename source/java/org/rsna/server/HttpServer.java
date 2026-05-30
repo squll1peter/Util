@@ -14,6 +14,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import javax.net.ServerSocketFactory;
@@ -36,6 +37,7 @@ public class HttpServer extends Thread {
 	final ServerSocket serverSocket;
 	final ThreadPoolExecutor execSvc;
 	final LinkedBlockingQueue<Runnable> queue;
+	final int queueCapacity;
 
 	/**
 	 * Class constructor; creates a new instance of
@@ -53,11 +55,29 @@ public class HttpServer extends Thread {
 		this.maxThreads = maxThreads;
 		this.selector = selector;
 		
-		queue = new LinkedBlockingQueue<Runnable>();
+		queueCapacity = Math.max(100, maxThreads * 50);
+		queue = new LinkedBlockingQueue<Runnable>(queueCapacity);
 		ServerSocketFactory serverSocketFactory =
 			ssl ? SSLServerSocketFactory.getDefault() : ServerSocketFactory.getDefault();
 		serverSocket = serverSocketFactory.createServerSocket(port);
-		execSvc = new ThreadPoolExecutor( maxThreads, maxThreads, 0L, TimeUnit.MILLISECONDS, queue );
+		RejectedExecutionHandler rejectionHandler = new RejectedExecutionHandler() {
+			public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+				if (r instanceof HttpHandler) {
+					HttpHandler handler = (HttpHandler)r;
+					try {
+						HttpResponse res = new HttpResponse(handler.socket);
+						res.setResponseCode(503);
+						res.write("Service Unavailable");
+						res.send();
+						res.close();
+					}
+					catch (Exception ignore) { }
+					try { handler.socket.close(); } catch (Exception ignore) { }
+				}
+				logger.warn("HttpServer queue full; request rejected with 503");
+			}
+		};
+		execSvc = new ThreadPoolExecutor( maxThreads, maxThreads, 0L, TimeUnit.MILLISECONDS, queue, rejectionHandler );
 	}
 
 	/**

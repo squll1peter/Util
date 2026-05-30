@@ -84,7 +84,7 @@ public class LoggerLevelServlet extends Servlet {
 		}
 
 		Document xsl = getDocument("LoggerLevelServlet.xsl");
-		String[] params = new String[] { "home", home };
+		String[] params = new String[] { "home", home, "csrfToken", getCsrfToken(req) };
 		res.write( XmlUtil.getTransformedText( xml, xsl, params ) );
 		res.setContentType("html");
 		res.disableCaching();
@@ -103,7 +103,7 @@ public class LoggerLevelServlet extends Servlet {
 	public void doPost(HttpRequest req, HttpResponse res) throws Exception {
 
 		//Make sure the user is authorized to do this.
-		if (!req.userHasRole("admin") || !req.isReferredFrom(context)) {
+		if (!req.userHasRole("admin") || !req.isReferredFrom(context) || !hasValidCsrfToken(req)) {
 			res.setResponseCode(res.notfound);
 			res.send();
 			return;
@@ -136,7 +136,6 @@ public class LoggerLevelServlet extends Servlet {
 	}
 
 }
-
 
 
 

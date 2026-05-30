@@ -70,8 +70,8 @@ public class UserManagerServlet extends Servlet {
 		 }
 
 		//Make the page and return it.
-		if (req.hasParameter("suppress")) home = "";
-		res.write( getPage( (UsersXmlFileImpl)users ) );
+			String pageHome = req.hasParameter("suppress") ? "" : home;
+			res.write( getPage( (UsersXmlFileImpl)users, pageHome, getCsrfToken(req) ) );
 		res.setContentType("html");
 		res.disableCaching();
 		res.send();
@@ -94,7 +94,7 @@ public class UserManagerServlet extends Servlet {
 			if (req.isFromAuthenticatedUser()) {
 				username = req.getUser().getUsername();
 			}
-			logger.debug("POST received from "+username+" at "+req.getRemoteAddress()+"\n"+req.toString()+"\n");
+				logger.debug("POST received from "+username+" at "+req.getRemoteAddress()+"\n"+req.toSafeString()+"\n");
 			logger.debug("Headers:\n"+req.listHeaders(""));
 			logger.debug("Cookies:\n"+req.listCookies(""));
 			logger.debug("User has shutdown role: "+req.userHasRole("shutdown"));
@@ -104,7 +104,7 @@ public class UserManagerServlet extends Servlet {
 		}
 
 		//Make sure the user is authorized to do this.
-		if (!req.userHasRole("admin") || !req.isReferredFrom(context)) {
+		if (!req.userHasRole("admin") || !req.isReferredFrom(context) || !hasValidCsrfToken(req)) {
 			res.setResponseCode(res.forbidden);
 			res.send();
 			return;
@@ -194,8 +194,8 @@ public class UserManagerServlet extends Servlet {
 		usersXmlFileImpl.resetUsers(newUserTable);
 
 		//Make a new page from the new data and return it.
-		if (req.hasParameter("suppress")) home = "";
-		res.write(getPage(usersXmlFileImpl));
+			String pageHome = req.hasParameter("suppress") ? "" : home;
+			res.write(getPage(usersXmlFileImpl, pageHome, getCsrfToken(req)));
 		res.setContentType("html");
 		res.disableCaching();
 		res.send();
@@ -246,12 +246,12 @@ public class UserManagerServlet extends Servlet {
 
 	//Create an HTML page containing the form for managing
 	//the users and roles.
-	private String getPage(UsersXmlFileImpl users) {
+	private String getPage(UsersXmlFileImpl users, String pageHome, String csrfToken) {
 		String[] usernames = users.getUsernames();
 		String[] rolenames = users.getRoleNames();
 
 		StringBuffer sb = new StringBuffer();
-		responseHead(sb);
+		responseHead(sb, pageHome, csrfToken);
 		makeTableHeader(sb, rolenames);
 		makeTableRows(sb, users, usernames, rolenames);
 		responseTail(sb);
@@ -302,15 +302,19 @@ public class UserManagerServlet extends Servlet {
 		sb.append( " </tr>\n" );
 	}
 
-	private void responseHead(StringBuffer sb) {
+	private void responseHead(StringBuffer sb, String pageHome, String csrfToken) {
+		if (pageHome == null) pageHome = "";
+		if (csrfToken == null) csrfToken = "";
+		pageHome = pageHome.replace("\"", "&quot;");
+		csrfToken = csrfToken.replace("\"", "&quot;");
 		sb.append(
-				"<html>\n"
-			+	" <head>\n"
+					"<html>\n"
+				+	" <head>\n"
 			+	"  <title>User Manager</title>\n"
 			+	"  <link rel=\"Stylesheet\" type=\"text/css\" media=\"all\" href=\"/BaseStyles.css\"></link>\n"
 			+	"  <link rel=\"Stylesheet\" type=\"text/css\" media=\"all\" href=\"/JSPopup.css\"></link>\n"
 			+	"  <link rel=\"Stylesheet\" type=\"text/css\" media=\"all\" href=\"/UserManagerServlet.css\"></link>\n"
-			+	"  <script> var home = \""+home+"\";</script>\n"
+				+	"  <script> var home = \""+pageHome+"\";</script>\n"
 			+	"  <script language=\"JavaScript\" type=\"text/javascript\" src=\"/JSUtil.js\">;</script>\n"
 			+	"  <script language=\"JavaScript\" type=\"text/javascript\" src=\"/JSPopup.js\">;</script>\n"
 			+	"  <script language=\"JavaScript\" type=\"text/javascript\" src=\"/UserManagerServlet.js\">;</script>\n"
@@ -319,10 +323,10 @@ public class UserManagerServlet extends Servlet {
 			+	"  <div style=\"float:right;\">\n"
 		);
 
-		if (!home.equals("")) {
-			sb.append(
-					"   <img src=\"/icons/home.png\"\n"
-				+	"    onclick=\"window.open('"+home+"','_self');\"\n"
+			if (!pageHome.equals("")) {
+				sb.append(
+						"   <img src=\"/icons/home.png\"\n"
+					+	"    onclick=\"window.open('"+pageHome+"','_self');\"\n"
 				+	"    style=\"margin:2px;\"\n"
 				+	"    title=\"Return to the home page\"/>\n"
 				+	"   <br>\n"
@@ -345,7 +349,7 @@ public class UserManagerServlet extends Servlet {
 			+	"   <form id=\"formID\" action=\"/users\" method=\"post\" accept-charset=\"UTF-8\" action=\"\">\n"
 		);
 
-		if (home.equals("")) {
+			if (pageHome.equals("")) {
 			sb.append(
 					"   <input type=\"hidden\" name=\"suppress\" value=\"\"/>\n"
 			);
@@ -353,6 +357,7 @@ public class UserManagerServlet extends Servlet {
 
 		sb.append(
 				"    <div>\n" +
+				"    <input type=\"hidden\" name=\"csrfToken\" value=\""+csrfToken+"\"/>\n" +
 				"    <table id=\"userTable\" border=\"1\">\n"
 		);
 	}
@@ -369,8 +374,6 @@ public class UserManagerServlet extends Servlet {
 	}
 
 }
-
-
 
 
 

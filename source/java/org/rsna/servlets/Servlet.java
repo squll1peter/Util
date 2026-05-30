@@ -10,6 +10,7 @@ package org.rsna.servlets;
 import java.io.*;
 import java.net.URL;
 import org.apache.log4j.Logger;
+import org.rsna.server.Authenticator;
 import org.rsna.server.HttpRequest;
 import org.rsna.server.HttpResponse;
 import org.rsna.util.Cache;
@@ -168,20 +169,16 @@ public class Servlet {
 	public void doOptions(HttpRequest req, HttpResponse res) throws Exception {
 		res.disableCaching();
 		res.setResponseCode( res.ok );
-		String originHeader = req.getHeader("Origin");
-		if ((originHeader != null) && !originHeader.equals("null")) {
-			res.setHeader("Access-Control-Allow-Origin", originHeader);
-		}
-		String methodHeader = req.getHeader("Access-Control-Request-Method");
-		if (methodHeader != null) {
-			res.setHeader("Access-Control-Allow-Methods", methodHeader);
-		}
-		else {
-			res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-		}
-		String headersHeader = req.getHeader("Access-Control-Request-Headers");
-		if (headersHeader != null) res.setHeader("Access-Control-Allow-Headers", headersHeader);
+		res.setHeader("Allow", "GET, POST, PUT, DELETE, OPTIONS");
 		res.send();
+	}
+
+	protected String getCsrfToken(HttpRequest req) {
+		return Authenticator.getInstance().getCsrfToken(req);
+	}
+
+	protected boolean hasValidCsrfToken(HttpRequest req) {
+		return Authenticator.getInstance().validateCsrfToken(req);
 	}
 
 	/**

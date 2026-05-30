@@ -104,6 +104,19 @@ public abstract class Users {
 	}
 
 	/**
+	 * Check whether a set of credentials matches a user in the system
+	 * with request context available for policy checks.
+	 * Default behavior delegates to authenticate(username, password).
+	 * @param username the plaintext username
+	 * @param password the plaintext password
+	 * @param req the request context, if available
+	 * @return the matching user or null.
+	 */
+	public User authenticate(String username, String password, HttpRequest req) {
+		return authenticate(username, password);
+	}
+
+	/**
 	 * Check whether a request comes from a user known to an external system.
 	 * This implementation returns null, indicating that no external system can
 	 * associate a user with this request. Single Sign On implementations must

@@ -8,9 +8,8 @@
 package org.rsna.servlets;
 
 import java.io.File;
-import java.net.URI;
-import java.net.URL;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.log4j.Logger;
 import org.rsna.server.Authenticator;
 import org.rsna.server.HttpRequest;
@@ -18,6 +17,7 @@ import org.rsna.server.HttpResponse;
 import org.rsna.server.User;
 import org.rsna.server.Users;
 import org.rsna.server.UsersOpenAMImpl;
+import org.rsna.util.AttackLog;
 import org.rsna.util.FileUtil;
 import org.rsna.util.StringUtil;
 
@@ -27,6 +27,12 @@ import org.rsna.util.StringUtil;
 public class LoginServlet extends Servlet {
 
 	static final Logger logger = Logger.getLogger(LoginServlet.class);
+	private static final int MAX_FAILURES = 5;
+	private static final long FAILURE_WINDOW_MS = 5L * 60L * 1000L;
+	private static final long RESET_INACTIVITY_MS = 15L * 60L * 1000L;
+	private static final long MAX_DELAY_MS = 2000L;
+	private static final int MAX_THROTTLE_STATES = 1000;
+	private static final ConcurrentHashMap<String,ThrottleState> throttleStates = new ConcurrentHashMap<String,ThrottleState>();
 
 	/**
 	 * Construct a LoginServlet.
@@ -146,7 +152,35 @@ public class LoginServlet extends Servlet {
 
 		String username = req.getParameter("username");
 		String password = req.getParameter("password");
-		login(req, res, username, password);
+		ThrottleDecision decision = evaluateThrottle(req, username);
+		if (decision.blocked) {
+			sleep(decision.delayMs);
+			AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+				System.currentTimeMillis(), req.getRemoteAddress(), req.getMethod(), req.getPath(), req.getHost(),
+				"throttle event", "warn", "login throttled", username, req.getHeader("User-Agent", "")));
+			res.setResponseCode(429);
+			res.send();
+			return;
+		}
+		boolean passed = login(req, res, username, password);
+		if (!passed) {
+			decision = registerFailure(req, username);
+			sleep(decision.delayMs);
+			if (decision.blocked) {
+				AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+					System.currentTimeMillis(), req.getRemoteAddress(), req.getMethod(), req.getPath(), req.getHost(),
+					"throttle event", "warn", "login throttled after failure", username, req.getHeader("User-Agent", "")));
+				res.setResponseCode(429);
+				res.send();
+				return;
+			}
+			AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+				System.currentTimeMillis(), req.getRemoteAddress(), req.getMethod(), req.getPath(), req.getHost(),
+				"auth failure", "info", "login failed", username, req.getHeader("User-Agent", "")));
+		}
+		else {
+			resetThrottle(req, username);
+		}
 		redirect(req, res);
 	}
 
@@ -158,7 +192,7 @@ public class LoginServlet extends Servlet {
 		boolean passed = false;
 		Authenticator authenticator = Authenticator.getInstance();
 		if ((username != null) && (password != null)) {
-			User user = Users.getInstance().authenticate(username, password);
+			User user = Users.getInstance().authenticate(username, password, req);
 			if (user != null) {
 				passed = authenticator.createSession(user, req, res);
 				logger.debug("Response headers:\n"+res.listHeaders("  "));
@@ -183,27 +217,17 @@ public class LoginServlet extends Servlet {
 			}
 		}
 		logger.debug("Redirect URL before test: \""+url+"\"");
-		if (url.equals("") || isAttack(req, url) || !isSameHost(req, url)) url = "/";
+		if (url.equals("") || isAttack(req, url) || !isAllowedRedirectTarget(url)) url = "/";
 		logger.debug("Redirect URL after test: \""+url+"\"");
 		res.redirect(url);
 	}
 
-	//Check that a URL string points to the same host as an HttpRequest
-	//to defeat a kind of phishing attack
-	private boolean isSameHost(HttpRequest req, String urlString) {
-		if (!urlString.startsWith("/") && urlString.contains("://")) {
-			try {
-				URI uri = new URI(urlString);
-				URL url = uri.toURL();
-				String urlHost = url.getHost();
-				String reqHost = req.getHost();
-				logger.debug("isSameHost: req; \""+urlHost+"\" url: \""+urlHost+"\"");
-				if (reqHost.contains(":")) reqHost = reqHost.substring(0, reqHost.indexOf(":"));
-				return urlHost.equals(reqHost);
-			}
-			catch (Exception ex) { logger.debug("Unable to parse URL:", ex); }
-			return false;
-		}
+	//Allow only root-relative redirects. Reject absolute/scheme-relative paths.
+	private boolean isAllowedRedirectTarget(String urlString) {
+		if (urlString == null) return false;
+		if (!urlString.startsWith("/")) return false;
+		if (urlString.startsWith("//")) return false;
+		if (urlString.contains("\\")) return false;
 		return true;
 	}
 
@@ -216,8 +240,118 @@ public class LoginServlet extends Servlet {
 							|| path.contains("%")
 							|| path.contains("javascript");
 		if (attack) {
+			AttackLog.getInstance().recordEvent(new AttackLog.SecurityEvent(
+				System.currentTimeMillis(),
+				req.getRemoteAddress(),
+				req.getMethod(),
+				req.getPath(),
+				req.getHost(),
+				"suspicious redirect",
+				"warn",
+				"login redirect attack pattern",
+				"",
+				req.getHeader("User-Agent", "")));
 			logger.warn("Attack detected from "+req.getRemoteAddress());
 		}
 		return attack;
+	}
+
+	private ThrottleDecision evaluateThrottle(HttpRequest req, String username) {
+		String key = getThrottleKey(req, username);
+		ThrottleState state = throttleStates.get(key);
+		long now = System.currentTimeMillis();
+		if (state == null) return new ThrottleDecision(false, 0);
+		synchronized (state) {
+			if ((now - state.lastFailureMs) > RESET_INACTIVITY_MS) {
+				throttleStates.remove(key);
+				return new ThrottleDecision(false, 0);
+			}
+			if ((now - state.windowStartMs) > FAILURE_WINDOW_MS) {
+				state.windowStartMs = now;
+				state.failures = 0;
+			}
+			if (state.failures >= MAX_FAILURES) {
+				long delay = computeDelay(state.failures - MAX_FAILURES + 1);
+				return new ThrottleDecision(true, delay);
+			}
+			return new ThrottleDecision(false, 0);
+		}
+	}
+
+	private ThrottleDecision registerFailure(HttpRequest req, String username) {
+		pruneThrottleStates();
+		String key = getThrottleKey(req, username);
+		long now = System.currentTimeMillis();
+		ThrottleState state = throttleStates.computeIfAbsent(key, k -> new ThrottleState(now));
+		synchronized (state) {
+			if ((now - state.windowStartMs) > FAILURE_WINDOW_MS) {
+				state.windowStartMs = now;
+				state.failures = 0;
+			}
+			state.failures++;
+			state.lastFailureMs = now;
+			if (state.failures >= MAX_FAILURES) {
+				long delay = computeDelay(state.failures - MAX_FAILURES + 1);
+				return new ThrottleDecision(true, delay);
+			}
+			return new ThrottleDecision(false, computeDelay(0));
+		}
+	}
+
+	private void resetThrottle(HttpRequest req, String username) {
+		throttleStates.remove(getThrottleKey(req, username));
+	}
+
+	private void pruneThrottleStates() {
+		long now = System.currentTimeMillis();
+		for (String key : throttleStates.keySet()) {
+			ThrottleState state = throttleStates.get(key);
+			if ((state != null) && ((now - state.lastFailureMs) > RESET_INACTIVITY_MS)) throttleStates.remove(key);
+		}
+		if (throttleStates.size() < MAX_THROTTLE_STATES) return;
+		int removeCount = throttleStates.size() - MAX_THROTTLE_STATES + 1;
+		for (String key : throttleStates.keySet()) {
+			throttleStates.remove(key);
+			if (--removeCount <= 0) break;
+		}
+	}
+
+	private String getThrottleKey(HttpRequest req, String username) {
+		String ip = req.getRemoteAddress();
+		if (ip == null) ip = "unknown";
+		String user = (username == null) ? "" : username.trim().toLowerCase();
+		return ip + "|" + user;
+	}
+
+	private long computeDelay(int exponent) {
+		int exp = Math.max(0, exponent);
+		long delay = 250L * (1L << Math.min(3, exp));
+		return Math.min(MAX_DELAY_MS, delay);
+	}
+
+	private void sleep(long ms) {
+		if (ms <= 0) return;
+		try { Thread.sleep(ms); }
+		catch (Exception ignore) { }
+	}
+
+	static class ThrottleState {
+		long windowStartMs;
+		long lastFailureMs;
+		int failures;
+		ThrottleState(long now) {
+			this.windowStartMs = now;
+			this.lastFailureMs = now;
+			this.failures = 0;
+		}
+	}
+
+	static class ThrottleDecision {
+		final boolean blocked;
+		final long delayMs;
+		ThrottleDecision(boolean blocked, long delayMs) {
+			this.blocked = blocked;
+			this.delayMs = delayMs;
+		}
 	}
 }

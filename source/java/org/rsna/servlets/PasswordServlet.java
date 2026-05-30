@@ -64,6 +64,14 @@ public class PasswordServlet extends Servlet {
 			passwordPage = FileUtil.getText( getClass().getResourceAsStream("/password.html") );
 		}
 
+		String csrfToken = getCsrfToken(req);
+		String marker = "<form method=\"post\">";
+		if (csrfToken == null) csrfToken = "";
+		csrfToken = csrfToken.replace("\"", "&quot;");
+		String hidden = "<form method=\"post\"><input type=\"hidden\" name=\"csrfToken\" value=\""
+			+ csrfToken
+			+ "\"/>";
+		passwordPage = passwordPage.replace(marker, hidden);
 		res.write(passwordPage);
 		res.disableCaching();
 		res.setContentType("html");
@@ -77,7 +85,7 @@ public class PasswordServlet extends Servlet {
 	 * @param res the response object
 	 */
 	public void doPost(HttpRequest req, HttpResponse res) {
-		if (req.isReferredFrom(context)) {
+		if (req.isReferredFrom(context) && hasValidCsrfToken(req)) {
 			String pw1 = req.getParameter("pw1", "").trim();
 			String pw2 = req.getParameter("pw2", "").trim();
 			if (pw1.equals(pw2) && !pw1.equals("")) {
